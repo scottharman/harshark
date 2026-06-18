@@ -1,3 +1,5 @@
+import json
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextCursor
 
@@ -20,6 +22,7 @@ class EntrySelector():
         self._populateResponseHeaders()
         self._populateResponseCookies()
         self._populateResponseBody()
+        self._autoSelectBodyTabs()
 
     def _collectData(self):
         row_id = self.app.entries_table.item(self.app.entries_table.currentRow(), 0).text()
@@ -81,15 +84,8 @@ class EntrySelector():
         post_params = self.entry_data['request_postData_params']
 
         if post_text:
-            # truncate large post bodies by default
-            truncate_length = self.app.config.getConfig('truncate-character-count')
-            if len(post_text) > truncate_length:
-                self.app.request_expand_button.show()
-                self.app.request_body_tab_text.appendPlainText(post_text[:truncate_length])
-                self.app.request_body_tab_text.appendPlainText('. . .')
-            else:
-                self.app.request_expand_button.hide()
-                self.app.request_body_tab_text.appendPlainText(post_text)
+            self.app.request_expand_button.hide()
+            self.app.request_body_tab_text.appendPlainText(self._prettyJson(post_text))
 
         elif post_params:
             for param in post_params:
@@ -150,15 +146,9 @@ class EntrySelector():
 
     def _populateResponseBody(self):
         response_content = self.entry_data['response_content_text']
-        # truncate large response content by default
-        truncate_length = self.app.config.getConfig('truncate-character-count')
-        if len(response_content) > truncate_length:
-            self.app.response_expand_button.show()
-            self.app.response_body_tab_text.appendPlainText(response_content[:truncate_length])
-            self.app.response_body_tab_text.appendPlainText('. . .')
-        else:
-            self.app.response_expand_button.hide()
-            self.app.response_body_tab_text.appendPlainText(response_content)
+
+        self.app.response_expand_button.hide()
+        self.app.response_body_tab_text.appendPlainText(self._prettyJson(response_content))
 
         self.app.response_body_tab_text.moveCursor(QTextCursor.Start)
         self._toggleTabVisibility(self.app.response_tabs, self.app.response_body_tab_text, 2)
@@ -170,3 +160,22 @@ class EntrySelector():
             tab.setTabEnabled(position, False)
         else:
             tab.setTabEnabled(position, True)
+
+    def _autoSelectBodyTabs(self):
+        """Switch to Body tab automatically if it has content."""
+        # Request tabs: 0=Headers, 1=Parameters, 2=Cookies, 3=Body, 4=SAML
+        if self.app.request_tabs.isTabEnabled(3):
+            self.app.request_tabs.setCurrentIndex(3)
+        # Response tabs: 0=Headers, 1=Cookies, 2=Body
+        if self.app.response_tabs.isTabEnabled(2):
+            self.app.response_tabs.setCurrentIndex(2)
+
+    @staticmethod
+    def _prettyJson(text):
+        """Return pretty-printed JSON if text is valid JSON, otherwise return text unchanged."""
+        if not text:
+            return text
+        try:
+            return json.dumps(json.loads(text), indent=2)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return text

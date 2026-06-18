@@ -66,6 +66,7 @@ class MainApp(QMainWindow):
         self.global_results = None
         self.request_results = None
         self.response_results = None
+        self.jsonrpc_filter_active = False
         self.buildUi()
 
     def buildUi(self):
@@ -178,6 +179,13 @@ class MainApp(QMainWindow):
                                      statusTip='Resize columns to fit their contents')
         self.action_resize.triggered.connect(lambda: resizeColumns(self))
         menubar_view.addAction(self.action_resize)
+
+        # JSON-RPC only filter
+        self.action_jsonrpc_filter = QAction('&JSON-RPC Only', self, shortcut='ALT+J',
+                                             checkable=True,
+                                             statusTip='Show only JSON-RPC entries')
+        self.action_jsonrpc_filter.triggered.connect(self.toggleJsonRpcFilter)
+        menubar_view.addAction(self.action_jsonrpc_filter)
 
         # ------------
         # Options Menu
@@ -538,6 +546,25 @@ class MainApp(QMainWindow):
         self.config.setConfig('parse-saml', not current)
         if not current:
             self.statusbar.showMessage('SAML parsing has been enabled. Please re-open the HAR file.')
+
+    def toggleJsonRpcFilter(self):
+        self.jsonrpc_filter_active = self.action_jsonrpc_filter.isChecked()
+        if self.har_parsed is None:
+            return
+        row_count = self.entries_table.rowCount()
+        jsonrpc_col = 29
+        for row in range(row_count):
+            item = self.entries_table.item(row, jsonrpc_col)
+            is_jsonrpc = item is not None and bool(item.text())
+            self.entries_table.setRowHidden(row, self.jsonrpc_filter_active and not is_jsonrpc)
+        visible = sum(
+            1 for r in range(row_count) if not self.entries_table.isRowHidden(r)
+        )
+        self.statusbar.showMessage(
+            'JSON-RPC filter active: showing {} of {} entries.'.format(visible, row_count)
+            if self.jsonrpc_filter_active
+            else 'JSON-RPC filter cleared.'
+        )
 
     def globalSearch(self):
         search_results = GlobalSearch(self).found_rows
