@@ -72,6 +72,10 @@ class FileImporter():
             self.app.statusbar.showMessage('[ERROR] HAR file contains no entries.')
             raise HarImportException
 
+        # store source HAR on the app for export actions
+        self.app.har_raw = self.har_raw
+        self.app.har_path = self.har_path
+
     def _parseFile(self):
         """Take the raw HAR file and extract the relevant information to be used
         to populate the entries table and details panels.
@@ -86,6 +90,7 @@ class FileImporter():
         for entry in self.har_raw['log']['entries']:
 
             entry_parsed = {}
+            entry_parsed['raw_entry'] = entry
 
             entry_parsed['startedDateTime'] = entry.get('startedDateTime', '')
             entry_parsed['time'] = entry.get('time', 0)
