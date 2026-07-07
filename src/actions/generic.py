@@ -28,12 +28,16 @@ def decolourizeCells(app):
 
     colour_default_hex = app.config.getConfig('colour_scheme')['default']
     colour_default = QColor(colour_default_hex)
+    error_colour = QColor('#fb8072')
 
     for row in range(row_count):
         # TODO fragile, column indexes may change
-        app.entries_table.item(row, 4).setBackground(QColor(colour_default))    # method
-        app.entries_table.item(row, 5).setBackground(QColor(colour_default))    # protocol
-        app.entries_table.item(row, 11).setBackground(QColor(colour_default))   # status code
+        uid = app.entries_table.item(row, 0).text()
+        is_jsonrpc_error = app.har_parsed.get(uid, {}).get('jsonrpc_error', False)
+        cell_colour = error_colour if is_jsonrpc_error else colour_default
+        app.entries_table.item(row, 4).setBackground(cell_colour)    # method
+        app.entries_table.item(row, 5).setBackground(cell_colour)    # protocol
+        app.entries_table.item(row, 11).setBackground(cell_colour)   # status code
 
 def colourizeCells(app):
     row_count = app.entries_table.rowCount()
@@ -62,6 +66,14 @@ def colourizeCells(app):
         for status_code, colour in status_code_colours.items():
             if _statusCodeFloor(status_code_item.text()) == status_code:
                 status_code_item.setBackground(QColor(colour))
+
+        # JSON-RPC error rows override method/protocol/status colours
+        uid = app.entries_table.item(row, 0).text()
+        if app.har_parsed.get(uid, {}).get('jsonrpc_error', False):
+            error_colour = QColor('#fb8072')
+            app.entries_table.item(row, 4).setBackground(error_colour)
+            app.entries_table.item(row, 5).setBackground(error_colour)
+            app.entries_table.item(row, 11).setBackground(error_colour)
 
 def toggleColumnVisibility(app):
     column_config = app.config.getConfig('table_columns')

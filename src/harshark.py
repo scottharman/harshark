@@ -11,6 +11,10 @@ Usage:
 """
 
 import itertools
+import ast
+import copy
+import json
+import math
 import os
 import sys
 from itertools import cycle
@@ -22,6 +26,7 @@ from PyQt5.QtGui import QTextOption
 from PyQt5.QtGui import QFontDatabase
 from PyQt5.QtWidgets import QAbstractItemView
 from PyQt5.QtWidgets import QAction
+from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtWidgets import qApp
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtWidgets import QGroupBox
@@ -59,13 +64,16 @@ class MainApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.version = '2.3.1'
+        self.version = '2.4.0'
         self.config = configmgr.ConfigMgr()
         self.har_summary = None
         self.har_parsed = None
+        self.har_raw = None
+        self.har_path = None
         self.global_results = None
         self.request_results = None
         self.response_results = None
+        self.jsonrpc_filter_active = False
         self.buildUi()
 
     def buildUi(self):
@@ -130,6 +138,14 @@ class MainApp(QMainWindow):
         action_open.triggered.connect(self.openFile)
         menubar_file.addAction(action_open)
 
+        # export filtered JSON-RPC entries
+        self.action_export_jsonrpc = QAction('Export &Filtered JSON-RPC HAR', self,
+                             shortcut='Ctrl+Shift+E',
+                             statusTip='Export filtered JSON-RPC entries to a new HAR file')
+        self.action_export_jsonrpc.setEnabled(False)
+        self.action_export_jsonrpc.triggered.connect(self.exportFilteredJsonRpc)
+        menubar_file.addAction(self.action_export_jsonrpc)
+
         # quit Harshark
         action_exit = QAction('&Exit', self, shortcut='Ctrl+Q', icon=quit_icon,
                               statusTip='Exit Harshark')
@@ -178,6 +194,13 @@ class MainApp(QMainWindow):
                                      statusTip='Resize columns to fit their contents')
         self.action_resize.triggered.connect(lambda: resizeColumns(self))
         menubar_view.addAction(self.action_resize)
+
+        # JSON-RPC only filter
+        self.action_jsonrpc_filter = QAction('&JSON-RPC Only', self, shortcut='ALT+J',
+                                             checkable=True,
+                                             statusTip='Show only JSON-RPC entries')
+        self.action_jsonrpc_filter.triggered.connect(self.toggleJsonRpcFilter)
+        menubar_view.addAction(self.action_jsonrpc_filter)
 
         # ------------
         # Options Menu
@@ -494,6 +517,7 @@ class MainApp(QMainWindow):
     def openFile(self):
         try:
             FileImporter(self)
+            self.action_export_jsonrpc.setEnabled(True)
         except HarImportException:
             return()
 
@@ -538,6 +562,189 @@ class MainApp(QMainWindow):
         self.config.setConfig('parse-saml', not current)
         if not current:
             self.statusbar.showMessage('SAML parsing has been enabled. Please re-open the HAR file.')
+
+    def toggleJsonRpcFilter(self):
+        self.jsonrpc_filter_active = self.action_jsonrpc_filter.isChecked()
+        if self.har_parsed is None:
+            return
+        row_count = self.entries_table.rowCount()
+        jsonrpc_col = 29
+        for row in range(row_count):
+            item = self.entries_table.item(row, jsonrpc_col)
+            is_jsonrpc = item is not None and bool(item.text())
+            self.entries_table.setRowHidden(row, self.jsonrpc_filter_active and not is_jsonrpc)
+        visible = sum(
+            1 for r in range(row_count) if not self.entries_table.isRowHidden(r)
+        )
+        self.statusbar.showMessage(
+            'JSON-RPC filter active: showing {} of {} entries.'.format(visible, row_count)
+            if self.jsonrpc_filter_active
+            else 'JSON-RPC filter cleared.'
+        )
+
+    def exportFilteredJsonRpc(self):
+        if not self.har_parsed or not self.har_raw:
+            self.statusbar.showMessage('[ERROR] No HAR data loaded to export.')
+            return
+
+        selected_uids = []
+        row_count = self.entries_table.rowCount()
+
+        for row in range(row_count):
+            if self.jsonrpc_filter_active and self.entries_table.isRowHidden(row):
+                continue
+            uid_item = self.entries_table.item(row, 0)
+            if not uid_item:
+                continue
+            uid = uid_item.text()
+            entry = self.har_parsed.get(uid, {})
+            if entry.get('jsonrpc_method'):
+                selected_uids.append(uid)
+
+        if not selected_uids:
+            self.statusbar.showMessage('[WARN] No JSON-RPC entries available for export.')
+            return
+
+        default_export = os.path.splitext(self.har_path or 'filtered_jsonrpc.har')[0] + '_jsonrpc.har'
+        export_path = QFileDialog.getSaveFileName(
+            self,
+            'Export Filtered JSON-RPC HAR',
+            default_export,
+            'HAR Files (*.har);;JSON Files (*.json);;All Files (*)'
+        )[0]
+
+        if not export_path:
+            return
+
+        export_entries = []
+        fixed_count = 0
+        skipped_count = 0
+
+        for uid in selected_uids:
+            raw_entry = self.har_parsed.get(uid, {}).get('raw_entry')
+            if not raw_entry:
+                skipped_count += 1
+                continue
+
+            sanitized_entry, entry_fixed, entry_ok = self._sanitizeHarEntryForExport(raw_entry)
+            fixed_count += entry_fixed
+
+            if not entry_ok:
+                skipped_count += 1
+                continue
+
+            export_entries.append(sanitized_entry)
+
+        if not export_entries:
+            self.statusbar.showMessage('[ERROR] All selected entries were unprocessable and skipped.')
+            return
+
+        export_har = copy.deepcopy(self.har_raw)
+        export_har.setdefault('log', {})
+        export_har['log']['entries'] = export_entries
+
+        try:
+            with open(export_path, 'w', encoding='utf-8') as out_file:
+                json.dump(export_har, out_file, indent=2, ensure_ascii=False)
+            self.statusbar.showMessage(
+                '[OK] Exported {} JSON-RPC entries to {} (fixed: {}, skipped: {}).'.format(
+                    len(export_entries), export_path, fixed_count, skipped_count
+                )
+            )
+        except OSError:
+            self.statusbar.showMessage('[ERROR] Failed to write export file.')
+
+    def _sanitizeHarEntryForExport(self, entry):
+        """Attempt to fix malformed JSON-RPC bodies and ensure JSON-serializable output."""
+        fixed_count = 0
+        clean_entry = copy.deepcopy(entry)
+
+        for body_path in (('request', 'postData', 'text'), ('response', 'content', 'text')):
+            payload = self._getNestedValue(clean_entry, body_path)
+            if not isinstance(payload, str) or 'jsonrpc' not in payload.lower():
+                continue
+
+            repaired, repaired_ok, repaired_changed = self._repairJsonRpcPayload(payload)
+            if not repaired_ok:
+                return None, fixed_count, False
+            if repaired_changed:
+                fixed_count += 1
+                self._setNestedValue(clean_entry, body_path, repaired)
+
+        return self._jsonSafe(clean_entry), fixed_count, True
+
+    @staticmethod
+    def _repairJsonRpcPayload(payload):
+        """Fix common malformed JSON-RPC payloads; return (text, ok, changed)."""
+        try:
+            json.loads(payload)
+            return payload, True, False
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        stripped = payload.strip()
+        try:
+            json.loads(stripped)
+            return stripped, True, stripped != payload
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        try:
+            literal_obj = ast.literal_eval(stripped)
+            if MainApp._containsJsonRpc(literal_obj):
+                repaired = json.dumps(literal_obj, ensure_ascii=False)
+                return repaired, True, True
+        except (SyntaxError, ValueError, TypeError):
+            pass
+
+        return payload, False, False
+
+    @staticmethod
+    def _containsJsonRpc(obj):
+        if isinstance(obj, dict):
+            if 'jsonrpc' in obj:
+                return True
+            return any(MainApp._containsJsonRpc(v) for v in obj.values())
+        if isinstance(obj, list):
+            return any(MainApp._containsJsonRpc(i) for i in obj)
+        return False
+
+    @staticmethod
+    def _getNestedValue(data, path):
+        current = data
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                return None
+            current = current[key]
+        return current
+
+    @staticmethod
+    def _setNestedValue(data, path, value):
+        current = data
+        for key in path[:-1]:
+            if key not in current or not isinstance(current[key], dict):
+                current[key] = {}
+            current = current[key]
+        current[path[-1]] = value
+
+    @staticmethod
+    def _jsonSafe(obj):
+        """Coerce unsupported values so json.dump always succeeds."""
+        if obj is None or isinstance(obj, (str, bool, int)):
+            return obj
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8', errors='replace')
+        if isinstance(obj, list):
+            return [MainApp._jsonSafe(item) for item in obj]
+        if isinstance(obj, tuple):
+            return [MainApp._jsonSafe(item) for item in obj]
+        if isinstance(obj, dict):
+            return {str(k): MainApp._jsonSafe(v) for k, v in obj.items()}
+        return str(obj)
 
     def globalSearch(self):
         search_results = GlobalSearch(self).found_rows

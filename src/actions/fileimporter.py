@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from zlib import decompress
 
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtWidgets import QTableWidgetItem
 
@@ -71,6 +72,10 @@ class FileImporter():
             self.app.statusbar.showMessage('[ERROR] HAR file contains no entries.')
             raise HarImportException
 
+        # store source HAR on the app for export actions
+        self.app.har_raw = self.har_raw
+        self.app.har_path = self.har_path
+
     def _parseFile(self):
         """Take the raw HAR file and extract the relevant information to be used
         to populate the entries table and details panels.
@@ -85,6 +90,7 @@ class FileImporter():
         for entry in self.har_raw['log']['entries']:
 
             entry_parsed = {}
+            entry_parsed['raw_entry'] = entry
 
             entry_parsed['startedDateTime'] = entry.get('startedDateTime', '')
             entry_parsed['time'] = entry.get('time', 0)
@@ -197,7 +203,36 @@ class FileImporter():
                     entry_parsed['saml_request'] = self._parseSaml(entry_parsed['request_queryString'], 'request')
                 if entry_parsed['request_postData_text']:
                     entry_parsed['saml_response'] = self._parseSaml(entry_parsed['request_postData_text'], 'response')
-                
+
+            # JSON-RPC detection
+            entry_parsed['jsonrpc_method'] = ''
+            entry_parsed['jsonrpc_error'] = False
+
+            try:
+                req_text = entry_parsed['request_postData_text']
+                if req_text:
+                    req_body = json.loads(req_text)
+                    if isinstance(req_body, dict) and 'jsonrpc' in req_body:
+                        entry_parsed['jsonrpc_method'] = req_body.get('method', '')
+                    elif isinstance(req_body, list) and req_body and isinstance(req_body[0], dict) and 'jsonrpc' in req_body[0]:
+                        methods = [r.get('method', '') for r in req_body if isinstance(r, dict)]
+                        entry_parsed['jsonrpc_method'] = ', '.join(filter(None, methods))
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                pass
+
+            try:
+                resp_text = entry_parsed['response_content_text']
+                if resp_text:
+                    resp_body = json.loads(resp_text)
+                    if isinstance(resp_body, dict) and 'jsonrpc' in resp_body:
+                        if 'error' in resp_body:
+                            entry_parsed['jsonrpc_error'] = True
+                    elif isinstance(resp_body, list):
+                        if any('jsonrpc' in r and 'error' in r for r in resp_body if isinstance(r, dict)):
+                            entry_parsed['jsonrpc_error'] = True
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                pass
+
             # HAR files don't have a unique ID for each request so let's make one to be used
             # for indexing later.
             uid = ''.join(random.choice(string.ascii_lowercase) for i in range(8))
@@ -266,6 +301,15 @@ class FileImporter():
             t.setItem(r, 26, HTableWidgetItem(str(int(value['timings_wait'])), value['timings_wait']))
             t.setItem(r, 27, HTableWidgetItem(str(int(value['timings_receive'])), value['timings_receive']))
             t.setItem(r, 28, HTableWidgetItem(str(int(value['timings_ssl'])), value['timings_ssl']))
+            t.setItem(r, 29, QTableWidgetItem(str(value['jsonrpc_method'])))
+
+            # Highlight JSON-RPC error rows in red
+            if value.get('jsonrpc_error'):
+                error_colour = QColor('#fb8072')
+                for col in range(t.columnCount()):
+                    if t.item(r, col):
+                        t.item(r, col).setBackground(error_colour)
+
             r += 1
 
     def _finalise(self):
@@ -274,6 +318,10 @@ class FileImporter():
         self.app.global_results = None
         self.app.request_results = None
         self.app.response_results = None
+
+        # reset JSON-RPC filter
+        self.app.jsonrpc_filter_active = False
+        self.app.action_jsonrpc_filter.setChecked(False)
 
         # disable searching actions
         self.app.next_match_entries.setEnabled(False)
